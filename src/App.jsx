@@ -375,7 +375,7 @@ export default function PricingAssistant() {
           <div>
             <div style={{ fontSize: 11, letterSpacing: 3, textTransform: "uppercase", color: t.textFaint, marginBottom: 8 }}>Pricing Studio</div>
             <h1 className="header-title" style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: 32, fontWeight: 400, lineHeight: 1.2 }}>
-              {view === "calculator" ? (<>Project <span style={{ color: t.accent, fontStyle: "italic" }}>Estimate</span></>) : view === "crm" ? (<>Saved <span style={{ color: t.accent, fontStyle: "italic" }}>Quotes</span></>) : (<>Pricing <span style={{ color: t.accent, fontStyle: "italic" }}>Settings</span></>)}
+              {view === "calculator" ? (<>Project <span style={{ color: t.accent, fontStyle: "italic" }}>Estimate</span></>) : view === "crm" ? (<>Saved <span style={{ color: t.accent, fontStyle: "italic" }}>Quotes</span></>) : view === "analytics" ? (<>Business <span style={{ color: t.accent, fontStyle: "italic" }}>Analytics</span></>) : (<>Pricing <span style={{ color: t.accent, fontStyle: "italic" }}>Settings</span></>)}
             </h1>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
@@ -383,6 +383,7 @@ export default function PricingAssistant() {
             <div className="header-tabs" style={{ display: "flex", gap: 4, background: t.surfaceAlt, borderRadius: 10, padding: 4 }}>
               <button className={"tab " + (view === "calculator" ? "tab-active" : "tab-inactive")} onClick={() => setView("calculator")}>Calculator</button>
               <button className={"tab " + (view === "crm" ? "tab-active" : "tab-inactive")} onClick={() => setView("crm")}>Quotes{quotes.length > 0 ? " (" + quotes.length + ")" : ""}</button>
+              <button className={"tab " + (view === "analytics" ? "tab-active" : "tab-inactive")} onClick={() => setView("analytics")}>Analytics</button>
               <button className={"tab " + (view === "settings" ? "tab-active" : "tab-inactive")} onClick={() => setView("settings")}>Settings</button>
             </div>
           </div>
@@ -718,6 +719,234 @@ export default function PricingAssistant() {
           </div>
         )}
 
+        {/* ══════════ ANALYTICS ══════════ */}
+        {view === "analytics" && (
+          <div className="fade-in">
+            {quotes.length === 0 ? (
+              <div style={{ textAlign: "center", padding: "60px 0", color: t.textFaint }}>
+                <div style={{ fontSize: 32, marginBottom: 12, opacity: 0.3 }}>📊</div>
+                <div style={{ fontSize: 14 }}>No data yet. Create some quotes to see analytics!</div>
+              </div>
+            ) : (() => {
+              // Calculate analytics
+              const totalQuotes = quotes.length;
+              const sentQuotes = quotes.filter(q => q.status === "Sent").length;
+              const acceptedQuotes = quotes.filter(q => q.status === "Accepted").length;
+              const declinedQuotes = quotes.filter(q => q.status === "Declined").length;
+
+              const totalQuoted = quotes.reduce((s, q) => s + calcTotal(q, settings), 0);
+              const totalAccepted = quotes.filter(q => q.status === "Accepted").reduce((s, q) => s + calcTotal(q, settings), 0);
+              const totalDeclined = quotes.filter(q => q.status === "Declined").reduce((s, q) => s + calcTotal(q, settings), 0);
+
+              // Win rate: accepted / (sent + accepted + declined) - excludes drafts
+              const sentOrCompleted = sentQuotes + acceptedQuotes + declinedQuotes;
+              const winRate = sentOrCompleted > 0 ? Math.round((acceptedQuotes / sentOrCompleted) * 100) : 0;
+              const avgQuoteValue = totalQuotes > 0 ? Math.round(totalQuoted / totalQuotes) : 0;
+              const avgAcceptedValue = acceptedQuotes > 0 ? Math.round(totalAccepted / acceptedQuotes) : 0;
+
+              // Service popularity
+              const serviceStats = quotes.reduce((acc, q) => {
+                if (q.isLandingPage) {
+                  acc.landingPages = (acc.landingPages || 0) + 1;
+                } else {
+                  if (q.includeDesign) acc.design = (acc.design || 0) + 1;
+                  if (q.includeDev) acc.dev = (acc.dev || 0) + 1;
+                  if (q.includeCopy) acc.copy = (acc.copy || 0) + 1;
+                }
+                if (q.addBlog) acc.blog = (acc.blog || 0) + 1;
+                if (q.addShop) acc.shop = (acc.shop || 0) + 1;
+                return acc;
+              }, {});
+
+              const mostPopularService = Object.entries(serviceStats).sort((a, b) => b[1] - a[1])[0];
+
+              // Monthly breakdown (last 6 months)
+              const now = new Date();
+              const monthlyData = [];
+              for (let i = 5; i >= 0; i--) {
+                const month = new Date(now.getFullYear(), now.getMonth() - i, 1);
+                const monthQuotes = quotes.filter(q => {
+                  const qDate = new Date(q.createdAt);
+                  return qDate.getMonth() === month.getMonth() && qDate.getFullYear() === month.getFullYear();
+                });
+                const monthAccepted = monthQuotes.filter(q => q.status === "Accepted");
+                const acceptedCount = monthAccepted.length;
+                const totalCount = monthQuotes.length;
+
+                // Safety check: accepted should never exceed total
+                if (acceptedCount > totalCount) {
+                  console.warn("Data inconsistency: accepted (" + acceptedCount + ") > total (" + totalCount + ") for month", month);
+                }
+
+                monthlyData.push({
+                  label: month.toLocaleDateString("en-GB", { month: "short", year: "2-digit" }),
+                  quotes: totalCount,
+                  accepted: Math.min(acceptedCount, totalCount), // Cap at total
+                  revenue: monthAccepted.reduce((s, q) => s + calcTotal(q, settings), 0),
+                  winRate: totalCount > 0 ? Math.round((acceptedCount / totalCount) * 100) : 0
+                });
+              }
+
+              const maxMonthlyRevenue = Math.max(...monthlyData.map(m => m.revenue), 1);
+
+              return (
+                <>
+                  {/* Key Metrics */}
+                  <div className="stats-grid" style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16, marginBottom: 32 }}>
+                    {[
+                      { label: "Win Rate", value: winRate + "%", color: winRate >= 50 ? t.green : winRate >= 25 ? t.accent : t.red, sublabel: acceptedQuotes + " won of " + sentOrCompleted + " quotes" },
+                      { label: "Avg Quote Value", value: formatPrice(avgQuoteValue), color: t.accent, sublabel: "Across " + totalQuotes + " quotes" },
+                      { label: "Total Revenue", value: formatPrice(totalAccepted), color: t.green, sublabel: "From " + acceptedQuotes + " accepted" },
+                    ].map(s => (
+                      <div key={s.label} style={{ padding: "24px", borderRadius: 12, background: t.surface, border: "1px solid " + t.border }}>
+                        <div style={{ fontSize: 11, letterSpacing: 2, textTransform: "uppercase", color: t.textFaint, marginBottom: 8 }}>{s.label}</div>
+                        <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 32, fontWeight: 700, color: s.color, marginBottom: 4 }}>{s.value}</div>
+                        <div style={{ fontSize: 12, color: t.textDim }}>{s.sublabel}</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Status Breakdown */}
+                  <div style={{ background: t.surface, border: "1px solid " + t.border, borderRadius: 16, padding: 32, marginBottom: 24 }}>
+                    <div className="section-label" style={{ marginBottom: 20 }}>Quote Status Distribution</div>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 20 }}>
+                      {[
+                        { status: "Draft", count: quotes.filter(q => q.status === "Draft").length, color: STATUS_COLORS.Draft },
+                        { status: "Sent", count: sentQuotes, color: STATUS_COLORS.Sent },
+                        { status: "Accepted", count: acceptedQuotes, color: STATUS_COLORS.Accepted },
+                        { status: "Declined", count: declinedQuotes, color: STATUS_COLORS.Declined },
+                      ].map(s => (
+                        <div key={s.status} style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "20px", borderRadius: 10, background: s.color + "08", border: "1px solid " + s.color + "33" }}>
+                          <div style={{ fontSize: 36, fontWeight: 700, color: s.color, fontFamily: "'Playfair Display', serif" }}>{s.count}</div>
+                          <div style={{ fontSize: 13, color: t.textMuted, marginTop: 4 }}>{s.status}</div>
+                          <div style={{ fontSize: 11, color: t.textDim, marginTop: 2 }}>
+                            {totalQuotes > 0 ? Math.round((s.count / totalQuotes) * 100) : 0}%
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Revenue by Month */}
+                  <div style={{ background: t.surface, border: "1px solid " + t.border, borderRadius: 16, padding: 32, marginBottom: 24 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
+                      <div className="section-label" style={{ marginBottom: 0 }}>Revenue Trend (Last 6 Months)</div>
+                      <div style={{ display: "flex", gap: 20, fontSize: 12 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                          <div style={{ width: 12, height: 12, borderRadius: 3, background: "linear-gradient(180deg, " + t.green + ", " + t.green + "dd)" }} />
+                          <span style={{ color: t.textDim }}>Revenue</span>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                          <div style={{ width: 12, height: 12, borderRadius: 3, background: t.accentBg, border: "2px solid " + t.accent }} />
+                          <span style={{ color: t.textDim }}>Quotes</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Chart area with grid */}
+                    <div style={{ position: "relative", paddingTop: 40 }}>
+                      {/* Horizontal grid lines */}
+                      <div style={{ position: "absolute", top: 40, left: 0, right: 0, height: 240, display: "flex", flexDirection: "column", justifyContent: "space-between", pointerEvents: "none" }}>
+                        {[0, 1, 2, 3, 4].map(i => (
+                          <div key={i} style={{ height: 1, background: t.divider, opacity: 0.5 }} />
+                        ))}
+                      </div>
+
+                      {/* Bars */}
+                      <div style={{ display: "flex", alignItems: "flex-end", gap: 20, height: 240, position: "relative" }}>
+                        {monthlyData.map((m, i) => {
+                          const heightPercent = maxMonthlyRevenue > 0 ? (m.revenue / maxMonthlyRevenue) * 100 : 0;
+                          const hasData = m.revenue > 0 || m.quotes > 0;
+                          return (
+                            <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 12 }}>
+                              {/* Revenue value on top */}
+                              <div style={{ fontSize: 13, color: t.green, fontWeight: 700, minHeight: 20, fontFamily: "'DM Sans', sans-serif" }}>
+                                {m.revenue > 0 ? formatPrice(m.revenue) : ""}
+                              </div>
+
+                              {/* Bar */}
+                              <div style={{ width: "100%", height: heightPercent + "%", minHeight: hasData ? 32 : 8, background: m.revenue > 0 ? "linear-gradient(180deg, " + t.green + ", " + t.green + "dd)" : t.divider, borderRadius: "6px 6px 0 0", transition: "all 0.4s cubic-bezier(0.4, 0, 0.2, 1)", position: "relative", boxShadow: m.revenue > 0 ? "0 -2px 12px " + t.green + "22" : "none" }}>
+                                {/* Accepted count badge */}
+                                {m.accepted > 0 && (
+                                  <div style={{ position: "absolute", top: 8, left: "50%", transform: "translateX(-50%)", background: t.green, color: mode === "dark" ? "#0a0a0f" : "#ffffff", fontSize: 10, fontWeight: 700, padding: "3px 8px", borderRadius: 99, whiteSpace: "nowrap", boxShadow: "0 2px 8px rgba(0,0,0,0.15)" }}>
+                                    {m.accepted} won
+                                  </div>
+                                )}
+                              </div>
+
+                              {/* Month label */}
+                              <div style={{ fontSize: 12, color: t.text, fontWeight: 600, marginTop: 8 }}>{m.label}</div>
+
+                              {/* Quote count */}
+                              <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: t.textMuted }}>
+                                <div style={{ width: 6, height: 6, borderRadius: "50%", background: m.quotes > 0 ? t.accent : t.border }} />
+                                <span>{m.quotes} created</span>
+                              </div>
+                              {m.quotes > 0 && (
+                                <div style={{ fontSize: 10, color: m.winRate >= 50 ? t.green : m.winRate >= 25 ? t.accent : t.textFaint, marginTop: -4, fontWeight: 600 }}>
+                                  {m.winRate}% win rate
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Service Insights */}
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 24 }}>
+                    {/* Popular Services */}
+                    <div style={{ background: t.surface, border: "1px solid " + t.border, borderRadius: 16, padding: 28 }}>
+                      <div className="section-label" style={{ marginBottom: 16 }}>Popular Services</div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                        {Object.entries(serviceStats)
+                          .sort((a, b) => b[1] - a[1])
+                          .map(([service, count]) => {
+                            const maxCount = Math.max(...Object.values(serviceStats));
+                            const widthPercent = (count / maxCount) * 100;
+                            const labels = { design: "Design", dev: "Development", copy: "Copywriting", blog: "Blog", shop: "Shop", landingPages: "Landing Pages" };
+                            return (
+                              <div key={service}>
+                                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6, fontSize: 13 }}>
+                                  <span style={{ color: t.text }}>{labels[service] || service}</span>
+                                  <span style={{ color: t.accent, fontWeight: 600 }}>{count}</span>
+                                </div>
+                                <div style={{ height: 6, background: t.border, borderRadius: 99, overflow: "hidden" }}>
+                                  <div style={{ width: widthPercent + "%", height: "100%", background: "linear-gradient(90deg, " + t.accent + ", " + t.accentDim + ")", transition: "width 0.3s ease" }} />
+                                </div>
+                              </div>
+                            );
+                          })}
+                      </div>
+                    </div>
+
+                    {/* Value Insights */}
+                    <div style={{ background: t.surface, border: "1px solid " + t.border, borderRadius: 16, padding: 28 }}>
+                      <div className="section-label" style={{ marginBottom: 16 }}>Value Insights</div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                        <div>
+                          <div style={{ fontSize: 12, color: t.textDim, marginBottom: 4 }}>Average Quote</div>
+                          <div style={{ fontSize: 24, fontWeight: 700, color: t.text, fontFamily: "'Playfair Display', serif" }}>{formatPrice(avgQuoteValue)}</div>
+                        </div>
+                        <div>
+                          <div style={{ fontSize: 12, color: t.textDim, marginBottom: 4 }}>Average Accepted</div>
+                          <div style={{ fontSize: 24, fontWeight: 700, color: t.green, fontFamily: "'Playfair Display', serif" }}>{formatPrice(avgAcceptedValue)}</div>
+                        </div>
+                        <div>
+                          <div style={{ fontSize: 12, color: t.textDim, marginBottom: 4 }}>Lost Revenue</div>
+                          <div style={{ fontSize: 24, fontWeight: 700, color: t.red, fontFamily: "'Playfair Display', serif" }}>{formatPrice(totalDeclined)}</div>
+                          <div style={{ fontSize: 11, color: t.textFaint, marginTop: 2 }}>From {declinedQuotes} declined quotes</div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+        )}
+
         {/* ══════════ SETTINGS ══════════ */}
         {view === "settings" && (
           <div className="fade-in">
@@ -873,6 +1102,90 @@ export default function PricingAssistant() {
 
                   <div style={{ fontSize: 12, color: t.textFaint, marginTop: 12, lineHeight: 1.5 }}>
                     💡 Tip: Export regularly to keep a backup of your quotes and settings. The exported file can be imported back at any time.
+                  </div>
+
+                  <div style={{ marginTop: 24, paddingTop: 24, borderTop: "1px solid " + t.divider }}>
+                    <button
+                      className="btn-sm"
+                      onClick={() => {
+                        if (!window.confirm("Add 20 test quotes with realistic data? This will help you test the Analytics dashboard.")) return;
+
+                        const clients = ["Acme Corp", "TechStart Ltd", "Green Energy Co", "Urban Cafe", "FitLife Gym", "BookWorm Publishing", "StyleHub Fashion", "AutoCare Services", "HomeDesign Pro", "EcoFriendly Products"];
+                        const projects = ["Corporate Website", "E-commerce Store", "Portfolio Site", "Landing Page Campaign", "Blog Platform", "Product Showcase", "Service Directory", "Booking System", "Marketing Site", "Company Rebrand"];
+                        const statuses = ["Draft", "Sent", "Accepted", "Declined"];
+                        const statusWeights = [0.15, 0.25, 0.45, 0.15]; // 45% accepted, realistic
+
+                        const testQuotes = [];
+                        const now = Date.now();
+
+                        for (let i = 0; i < 20; i++) {
+                          // Random date within last 6 months
+                          const daysAgo = Math.floor(Math.random() * 180);
+                          const createdAt = new Date(now - daysAgo * 24 * 60 * 60 * 1000).toISOString();
+
+                          // Random status based on weights
+                          const rand = Math.random();
+                          let status = statuses[0];
+                          let cumWeight = 0;
+                          for (let j = 0; j < statuses.length; j++) {
+                            cumWeight += statusWeights[j];
+                            if (rand <= cumWeight) {
+                              status = statuses[j];
+                              break;
+                            }
+                          }
+
+                          const isLandingPage = Math.random() < 0.2;
+                          const pages = isLandingPage ? 1 : Math.floor(Math.random() * 15) + 3;
+                          const includeDesign = !isLandingPage && Math.random() < 0.85;
+                          const includeDev = !isLandingPage && Math.random() < 0.9;
+                          const includeCopy = !isLandingPage && Math.random() < 0.3;
+                          const addBlog = !isLandingPage && Math.random() < 0.4;
+                          const addShop = !isLandingPage && Math.random() < 0.2;
+                          const includePM = Math.random() < 0.8;
+                          const includeContingency = Math.random() < 0.7;
+
+                          const hasDiscount = Math.random() < 0.25;
+                          const discountType = hasDiscount ? (Math.random() < 0.6 ? "percent" : "fixed") : "percent";
+                          const discountValue = hasDiscount ? (discountType === "percent" ? Math.floor(Math.random() * 15) + 5 : Math.floor(Math.random() * 500) + 100) : 0;
+
+                          const quote = {
+                            id: uid(),
+                            clientName: clients[Math.floor(Math.random() * clients.length)],
+                            projectName: projects[Math.floor(Math.random() * projects.length)],
+                            pages: pages,
+                            includeDesign: includeDesign,
+                            includeDev: includeDev,
+                            includeCopy: includeCopy,
+                            isLandingPage: isLandingPage,
+                            addBlog: addBlog,
+                            addShop: addShop,
+                            customPostTypes: [],
+                            plugins: [],
+                            includePM: includePM,
+                            includeContingency: includeContingency,
+                            discountType: discountType,
+                            discountValue: discountValue,
+                            status: status,
+                            notes: status === "Accepted" ? "Client approved! Starting next week." : status === "Declined" ? "Budget constraints." : "",
+                            createdAt: createdAt
+                          };
+
+                          quote.total = calcTotal(quote, settings);
+                          testQuotes.push(quote);
+                        }
+
+                        setQuotes(testQuotes.concat(quotes));
+                        alert("Added 20 test quotes! Check the Analytics tab to see them in action.");
+                        setView("analytics");
+                      }}
+                      style={{ color: t.accent, borderColor: t.accentBorder }}
+                    >
+                      + Add Test Data
+                    </button>
+                    <div style={{ fontSize: 11, color: t.textFaint, marginTop: 8 }}>
+                      Generates 20 realistic quotes with varied dates, statuses, and configurations
+                    </div>
                   </div>
                 </div>
 
