@@ -1,11 +1,12 @@
 import { useState, useEffect } from "react";
 
 // ─── Constants ───
-const RATE = 175;
-const MIN_PROJECT = 1750;
-const LANDING_PAGE_PRICE = 700;
+const DEFAULT_RATE = 175;
+const DEFAULT_MIN_PROJECT = 1750;
+const DEFAULT_LANDING_PAGE_PRICE = 700;
 const STORAGE_KEY = "pricing-studio-quotes";
 const THEME_KEY = "pricing-studio-theme";
+const SETTINGS_KEY = "pricing-studio-settings";
 const STATUSES = ["Draft", "Sent", "Accepted", "Declined"];
 const STATUS_COLORS = { Draft: "#888", Sent: "#c9a96e", Accepted: "#6ec96e", Declined: "#c96e6e" };
 
@@ -44,17 +45,29 @@ function uid() { return Date.now().toString(36) + Math.random().toString(36).sli
 function loadQuotes() { try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; } catch { return []; } }
 function saveQuotes(q) { localStorage.setItem(STORAGE_KEY, JSON.stringify(q)); }
 function loadTheme() { try { return localStorage.getItem(THEME_KEY) || "dark"; } catch { return "dark"; } }
+function loadSettings() { try { return JSON.parse(localStorage.getItem(SETTINGS_KEY)) || { rate: DEFAULT_RATE, minProject: DEFAULT_MIN_PROJECT, landingPagePrice: DEFAULT_LANDING_PAGE_PRICE, showInternalCosts: false }; } catch { return { rate: DEFAULT_RATE, minProject: DEFAULT_MIN_PROJECT, landingPagePrice: DEFAULT_LANDING_PAGE_PRICE, showInternalCosts: false }; } }
+function saveSettings(s) { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); }
 
-function calcTotal(q) {
+function calcTotal(q, settings) {
+  const rate = settings?.rate || DEFAULT_RATE;
+  const minProject = settings?.minProject || DEFAULT_MIN_PROJECT;
+  const landingPagePrice = settings?.landingPagePrice || DEFAULT_LANDING_PAGE_PRICE;
   const sc = (q.includeDesign ? 1 : 0) + (q.includeDev ? 1 : 0) + (q.includeCopy ? 1 : 0);
-  const pt = q.isLandingPage ? LANDING_PAGE_PRICE : q.pages * sc * RATE;
-  const sub = pt + (q.addBlog ? 700 : 0) + (q.addShop ? 700 : 0) + ((q.customPostTypes || []).length * 700);
+  const pt = q.isLandingPage ? landingPagePrice : q.pages * sc * rate;
+  const pluginCost = (q.plugins || []).reduce(function(sum, p) { return sum + (p.cost || 0); }, 0);
+  const sub = pt + (q.addBlog ? 700 : 0) + (q.addShop ? 700 : 0) + ((q.customPostTypes || []).length * 700) + pluginCost;
   const pm = q.includePM ? Math.round(sub * 0.2) : 0;
   const cont = q.includeContingency ? Math.round(sub * 0.2) : 0;
   const pre = sub + pm + cont;
   const disc = q.discountValue > 0 ? (q.discountType === "percent" ? Math.round(pre * (q.discountValue / 100)) : Math.min(q.discountValue, pre)) : 0;
   const raw = pre - disc;
-  return q.isLandingPage ? raw : Math.max(raw, MIN_PROJECT);
+  return q.isLandingPage ? raw : Math.max(raw, minProject);
+}
+
+function calcRecurringCosts(q) {
+  const monthly = (q.plugins || []).filter(function(p) { return p.frequency === "monthly"; }).reduce(function(sum, p) { return sum + (p.cost || 0); }, 0);
+  const annual = (q.plugins || []).filter(function(p) { return p.frequency === "annual"; }).reduce(function(sum, p) { return sum + (p.cost || 0); }, 0);
+  return { monthly: monthly, annual: annual };
 }
 
 // ─── AnimatedNumber ───
@@ -87,45 +100,74 @@ const Toggle = ({ active, onToggle, label, sublabel, rightContent, t }) => (
 );
 
 // ─── PDF Export ───
-function exportPDF(q) {
-  const total = calcTotal(q);
+function exportPDF(q, settings) {
+  const rate = settings?.rate || DEFAULT_RATE;
+  const landingPagePrice = settings?.landingPagePrice || DEFAULT_LANDING_PAGE_PRICE;
+  const total = calcTotal(q, settings);
   const sc = (q.includeDesign ? 1 : 0) + (q.includeDev ? 1 : 0) + (q.includeCopy ? 1 : 0);
-  const pt = q.isLandingPage ? LANDING_PAGE_PRICE : q.pages * sc * RATE;
-  const sub = pt + (q.addBlog ? 700 : 0) + (q.addShop ? 700 : 0) + ((q.customPostTypes || []).length * 700);
+  const pt = q.isLandingPage ? landingPagePrice : q.pages * sc * rate;
+  const pluginCost = (q.plugins || []).reduce(function(sum, p) { return sum + (p.cost || 0); }, 0);
+  const sub = pt + (q.addBlog ? 700 : 0) + (q.addShop ? 700 : 0) + ((q.customPostTypes || []).length * 700) + pluginCost;
   const pm = q.includePM ? Math.round(sub * 0.2) : 0;
   const cont = q.includeContingency ? Math.round(sub * 0.2) : 0;
   const pre = sub + pm + cont;
   const disc = q.discountValue > 0 ? (q.discountType === "percent" ? Math.round(pre * (q.discountValue / 100)) : Math.min(q.discountValue, pre)) : 0;
+
+  // When hiding internal costs, adjust displayed rate to include PM/contingency
+  const pmMultiplier = q.includePM ? 1.2 : 1;
+  const contMultiplier = q.includeContingency ? 1.2 : 1;
+  const adjustedRate = settings?.showInternalCosts ? rate : Math.round(rate * pmMultiplier * contMultiplier);
+
   const svcs = [];
   if (!q.isLandingPage) { if (q.includeDesign) svcs.push("Design"); if (q.includeDev) svcs.push("Development"); if (q.includeCopy) svcs.push("Copywriting"); }
   const rows = [];
-  if (q.isLandingPage) { rows.push(["Landing Page Offer", formatPrice(LANDING_PAGE_PRICE)]); }
-  else { svcs.forEach(function(s) { rows.push([s + " (" + q.pages + " pages \u00d7 " + formatPrice(RATE) + ")", formatPrice(q.pages * RATE)]); }); }
+  if (q.isLandingPage) { rows.push(["Landing Page Offer", formatPrice(landingPagePrice)]); }
+  else { svcs.forEach(function(s) { rows.push([s + " (" + q.pages + " pages \u00d7 " + formatPrice(adjustedRate) + ")", formatPrice(q.pages * adjustedRate)]); }); }
   if (q.addBlog) rows.push(["Blog (Index + Archive)", formatPrice(700)]);
   if (q.addShop) rows.push(["Shop", formatPrice(700)]);
   (q.customPostTypes || []).forEach(function(cpt) { rows.push([cpt.name + " (Index + Archive)", formatPrice(700)]); });
-  rows.push(["__div__", ""]); rows.push(["Subtotal", formatPrice(sub)]);
-  if (q.includePM) rows.push(["Project Management (20%)", formatPrice(pm)]);
-  if (q.includeContingency) rows.push(["Contingency (20%)", formatPrice(cont)]);
+  (q.plugins || []).forEach(function(plugin) {
+    var label = plugin.name + " (Plugin/Service)";
+    if (plugin.frequency === "monthly") label += " - Monthly";
+    if (plugin.frequency === "annual") label += " - Annual";
+    rows.push([label, formatPrice(plugin.cost)]);
+  });
+  rows.push(["__div__", ""]);
+  if (settings?.showInternalCosts) {
+    rows.push(["Subtotal", formatPrice(sub)]);
+    if (q.includePM) rows.push(["Project Management (20%)", formatPrice(pm)]);
+    if (q.includeContingency) rows.push(["Contingency (20%)", formatPrice(cont)]);
+  }
   if (disc > 0) rows.push(["Discount" + (q.discountType === "percent" ? " (" + q.discountValue + "%)" : ""), "\u2212" + formatPrice(disc)]);
   const trs = rows.map(function(r) { if (r[0] === "__div__") return '<tr><td colspan="2" style="border-bottom:1px solid #ddd;padding:8px 0"></td></tr>'; return '<tr><td style="padding:8px 0;color:#555">' + r[0] + '</td><td style="padding:8px 0;text-align:right;font-weight:600">' + r[1] + '</td></tr>'; }).join("");
-  const html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Quote</title><style>@import url("https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:ital,wght@0,400;0,700;1,400&display=swap");body{font-family:"DM Sans",sans-serif;padding:60px;color:#333;max-width:700px;margin:0 auto}h1{font-family:"Playfair Display",serif;font-weight:400;font-size:28px;margin:0 0 4px}table{width:100%;border-collapse:collapse;margin:24px 0}.total{font-family:"Playfair Display",serif;font-size:36px;font-weight:700;text-align:right;padding-top:16px;border-top:2px solid #333}.meta{color:#888;font-size:13px;margin-bottom:4px}.status{display:inline-block;padding:4px 14px;border-radius:99px;font-size:12px;font-weight:600;margin-top:8px}.notes{margin-top:24px;padding:16px;background:#f8f7f5;border-radius:8px;font-size:13px;color:#666;line-height:1.6}@media print{body{padding:40px}}</style></head><body><div style="margin-bottom:32px"><h1>' + (q.projectName || "Project Quote") + '</h1>' + (q.clientName ? '<div class="meta">Prepared for ' + q.clientName + '</div>' : '') + '<div class="meta">' + formatDate(q.createdAt) + '</div><div class="status" style="background:' + STATUS_COLORS[q.status] + '22;color:' + STATUS_COLORS[q.status] + '">' + q.status + '</div></div><table>' + trs + '</table><div class="total">' + formatPrice(total) + '</div>' + (q.notes ? '<div class="notes"><strong>Notes</strong><br>' + q.notes.replace(/\n/g, "<br>") + '</div>' : '') + '<script>window.onload=function(){window.print()}<\/script></body></html>';
+  const recurring = calcRecurringCosts(q);
+  const recurringHTML = (recurring.monthly > 0 || recurring.annual > 0) ? '<div style="margin-top:32px;padding:20px;background:#f8f7f5;border-radius:8px"><div style="font-size:12px;text-transform:uppercase;letter-spacing:1px;color:#888;margin-bottom:12px;font-weight:600">Recurring Costs</div>' + (recurring.monthly > 0 ? '<div style="display:flex;justify-content:space-between;margin-bottom:8px;font-size:14px"><span>Monthly</span><span style="font-weight:600">' + formatPrice(recurring.monthly) + '/mo</span></div>' : '') + (recurring.annual > 0 ? '<div style="display:flex;justify-content:space-between;font-size:14px"><span>Annual</span><span style="font-weight:600">' + formatPrice(recurring.annual) + '/yr</span></div>' : '') + '</div>' : '';
+  const html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Quote</title><style>@import url("https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:ital,wght@0,400;0,700;1,400&display=swap");body{font-family:"DM Sans",sans-serif;padding:60px;color:#333;max-width:700px;margin:0 auto}h1{font-family:"Playfair Display",serif;font-weight:400;font-size:28px;margin:0 0 4px}table{width:100%;border-collapse:collapse;margin:24px 0}.total{font-family:"Playfair Display",serif;font-size:36px;font-weight:700;text-align:right;padding-top:16px;border-top:2px solid #333}.meta{color:#888;font-size:13px;margin-bottom:4px}.status{display:inline-block;padding:4px 14px;border-radius:99px;font-size:12px;font-weight:600;margin-top:8px}.notes{margin-top:24px;padding:16px;background:#f8f7f5;border-radius:8px;font-size:13px;color:#666;line-height:1.6}@media print{body{padding:40px}}</style></head><body><div style="margin-bottom:32px"><h1>' + (q.projectName || "Project Quote") + '</h1>' + (q.clientName ? '<div class="meta">Prepared for ' + q.clientName + '</div>' : '') + '<div class="meta">' + formatDate(q.createdAt) + '</div><div class="status" style="background:' + STATUS_COLORS[q.status] + '22;color:' + STATUS_COLORS[q.status] + '">' + q.status + '</div></div><table>' + trs + '</table><div class="total">' + formatPrice(total) + '</div>' + recurringHTML + (q.notes ? '<div class="notes"><strong>Notes</strong><br>' + q.notes.replace(/\n/g, "<br>") + '</div>' : '') + '<script>window.onload=function(){window.print()}<\/script></body></html>';
   const w = window.open("", "_blank"); w.document.write(html); w.document.close();
 }
 
 // ─── Copy quote to clipboard ───
-function buildQuoteText(q) {
+function buildQuoteText(q, settings) {
+  const rate = settings?.rate || DEFAULT_RATE;
+  const landingPagePrice = settings?.landingPagePrice || DEFAULT_LANDING_PAGE_PRICE;
+
+  // When hiding internal costs, adjust displayed rate to include PM/contingency
+  const pmMultiplier = q.includePM ? 1.2 : 1;
+  const contMultiplier = q.includeContingency ? 1.2 : 1;
+  const adjustedRate = settings?.showInternalCosts ? rate : Math.round(rate * pmMultiplier * contMultiplier);
+
   const sc = (q.includeDesign ? 1 : 0) + (q.includeDev ? 1 : 0) + (q.includeCopy ? 1 : 0);
-  const pt = q.isLandingPage ? LANDING_PAGE_PRICE : q.pages * sc * RATE;
+  const pt = q.isLandingPage ? landingPagePrice : q.pages * sc * rate;
   const blog = q.addBlog ? 700 : 0; const shop = q.addShop ? 700 : 0;
   const cpts = (q.customPostTypes || []);
   const cptTotal = cpts.length * 700;
-  const sub = pt + blog + shop + cptTotal;
+  const pluginTotal = (q.plugins || []).reduce(function(sum, p) { return sum + (p.cost || 0); }, 0);
+  const sub = pt + blog + shop + cptTotal + pluginTotal;
   const pm = q.includePM ? Math.round(sub * 0.2) : 0;
   const cont = q.includeContingency ? Math.round(sub * 0.2) : 0;
   const pre = sub + pm + cont;
   const disc = q.discountValue > 0 ? (q.discountType === "percent" ? Math.round(pre * (q.discountValue / 100)) : Math.min(q.discountValue, pre)) : 0;
-  const total = calcTotal(q);
+  const total = calcTotal(q, settings);
   const svcs = [];
   if (!q.isLandingPage) { if (q.includeDesign) svcs.push("Design"); if (q.includeDev) svcs.push("Dev"); if (q.includeCopy) svcs.push("Copy"); }
   const dl = disc > 0 ? "Discount" + (q.discountType === "percent" ? " (" + q.discountValue + "%)" : "") + ": -" + formatPrice(disc) : null;
@@ -133,19 +175,37 @@ function buildQuoteText(q) {
     "Web Design Estimate",
     q.clientName ? "Client: " + q.clientName : null,
     q.projectName ? "Project: " + q.projectName : null, "",
-    q.isLandingPage ? "Landing Page Offer: " + formatPrice(LANDING_PAGE_PRICE) : q.pages + " Pages",
-    !q.isLandingPage ? "Services: " + svcs.join(", ") + " @ " + formatPrice(RATE) + "/page each" : null,
-    !q.isLandingPage ? "Page Total: " + formatPrice(pt) : null,
+    q.isLandingPage ? "Landing Page Offer: " + formatPrice(landingPagePrice) : q.pages + " Pages",
+    !q.isLandingPage ? "Services: " + svcs.join(", ") + " @ " + formatPrice(adjustedRate) + "/page each" : null,
+    !q.isLandingPage ? "Page Total: " + formatPrice(q.pages * sc * adjustedRate) : null,
     q.addBlog ? "Blog (Index + Archive): " + formatPrice(blog) : null,
     q.addShop ? "Shop: " + formatPrice(shop) : null,
   ];
   cpts.forEach(function(c) { lines.push(c.name + " (Index + Archive): " + formatPrice(700)); });
-  lines = lines.concat([
-    "Subtotal: " + formatPrice(sub), "",
-    q.includePM ? "Project Management (20%): " + formatPrice(pm) : null,
-    q.includeContingency ? "Contingency (20%): " + formatPrice(cont) : null,
-    dl, "", "Total: " + formatPrice(total),
-  ]);
+  (q.plugins || []).forEach(function(p) {
+    var label = p.name + " (Plugin/Service)";
+    if (p.frequency === "monthly") label += " - Monthly";
+    if (p.frequency === "annual") label += " - Annual";
+    lines.push(label + ": " + formatPrice(p.cost));
+  });
+  if (settings?.showInternalCosts) {
+    lines = lines.concat([
+      "Subtotal: " + formatPrice(sub), "",
+      q.includePM ? "Project Management (20%): " + formatPrice(pm) : null,
+      q.includeContingency ? "Contingency (20%): " + formatPrice(cont) : null,
+      dl, "", "Total: " + formatPrice(total),
+    ]);
+  } else {
+    lines = lines.concat([
+      dl, "", "Total: " + formatPrice(total),
+    ]);
+  }
+  const recurring = calcRecurringCosts(q);
+  if (recurring.monthly > 0 || recurring.annual > 0) {
+    lines.push("", "Recurring Costs:");
+    if (recurring.monthly > 0) lines.push("Monthly: " + formatPrice(recurring.monthly) + "/mo");
+    if (recurring.annual > 0) lines.push("Annual: " + formatPrice(recurring.annual) + "/yr");
+  }
   return lines.filter(function(l) { return l !== null; }).join("\n");
 }
 
@@ -156,6 +216,7 @@ export default function PricingAssistant() {
   const [mode, setMode] = useState(loadTheme);
   const [view, setView] = useState("calculator");
   const [quotes, setQuotes] = useState(loadQuotes);
+  const [settings, setSettings] = useState(loadSettings);
 
   const [pages, setPages] = useState(5);
   const [includeDesign, setIncludeDesign] = useState(true);
@@ -165,6 +226,7 @@ export default function PricingAssistant() {
   const [addBlog, setAddBlog] = useState(false);
   const [addShop, setAddShop] = useState(false);
   const [customPostTypes, setCustomPostTypes] = useState([]);
+  const [plugins, setPlugins] = useState([]);
   const [includePM, setIncludePM] = useState(true);
   const [includeContingency, setIncludeContingency] = useState(true);
   const [discountType, setDiscountType] = useState("percent");
@@ -181,17 +243,29 @@ export default function PricingAssistant() {
 
   useEffect(() => { saveQuotes(quotes); }, [quotes]);
   useEffect(() => { localStorage.setItem(THEME_KEY, mode); }, [mode]);
+  useEffect(() => { saveSettings(settings); }, [settings]);
 
   // ─── Pricing ───
+  const RATE = settings.rate;
+  const MIN_PROJECT = settings.minProject;
+  const LANDING_PAGE_PRICE = settings.landingPagePrice;
   const effectivePages = isLandingPage ? 1 : pages;
   const services = [];
   if (!isLandingPage) { if (includeDesign) services.push("Design"); if (includeDev) services.push("Dev"); if (includeCopy) services.push("Copy"); }
+
+  // When hiding internal costs, adjust displayed rate to include PM/contingency
+  const pmMultiplier = includePM ? 1.2 : 1;
+  const contMultiplier = includeContingency ? 1.2 : 1;
+  const displayRate = settings.showInternalCosts ? RATE : Math.round(RATE * pmMultiplier * contMultiplier);
+
   const perPageCost = services.length * RATE;
   const pageTotal = isLandingPage ? LANDING_PAGE_PRICE : effectivePages * perPageCost;
   const blogCost = addBlog ? 700 : 0;
   const shopCost = addShop ? 700 : 0;
   const cptCost = customPostTypes.length * 700;
-  const subtotal = pageTotal + blogCost + shopCost + cptCost;
+  const pluginCost = plugins.reduce(function(sum, p) { return sum + (p.cost || 0); }, 0);
+  const recurringCosts = calcRecurringCosts({ plugins: plugins });
+  const subtotal = pageTotal + blogCost + shopCost + cptCost + pluginCost;
   const pmCost = includePM ? Math.round(subtotal * 0.2) : 0;
   const contingencyCost = includeContingency ? Math.round(subtotal * 0.2) : 0;
   const preDiscountTotal = subtotal + pmCost + contingencyCost;
@@ -202,14 +276,14 @@ export default function PricingAssistant() {
   const belowMinimum = !isLandingPage && rawTotal < MIN_PROJECT && hasServices;
 
   const saveQuote = () => {
-    const data = { pages, includeDesign, includeDev, includeCopy, isLandingPage, addBlog, addShop, customPostTypes, includePM, includeContingency, discountType, discountValue, clientName, projectName, total, status: "Draft", notes: "", createdAt: new Date().toISOString() };
+    const data = { pages, includeDesign, includeDev, includeCopy, isLandingPage, addBlog, addShop, customPostTypes, plugins, includePM, includeContingency, discountType, discountValue, clientName, projectName, total, status: "Draft", notes: "", createdAt: new Date().toISOString() };
     if (editingId) { setQuotes(quotes.map(function(q) { return q.id === editingId ? Object.assign({}, q, data, { createdAt: q.createdAt, status: q.status, notes: q.notes }) : q; })); setEditingId(null); }
     else { data.id = uid(); setQuotes([data].concat(quotes)); }
     setView("crm");
   };
 
   const editQuote = (q) => {
-    setPages(q.pages); setIncludeDesign(q.includeDesign); setIncludeDev(q.includeDev); setIncludeCopy(q.includeCopy); setIsLandingPage(q.isLandingPage); setAddBlog(q.addBlog); setAddShop(q.addShop); setCustomPostTypes(q.customPostTypes || []); setIncludePM(q.includePM); setIncludeContingency(q.includeContingency); setDiscountType(q.discountType); setDiscountValue(q.discountValue); setClientName(q.clientName); setProjectName(q.projectName); setEditingId(q.id); setView("calculator");
+    setPages(q.pages); setIncludeDesign(q.includeDesign); setIncludeDev(q.includeDev); setIncludeCopy(q.includeCopy); setIsLandingPage(q.isLandingPage); setAddBlog(q.addBlog); setAddShop(q.addShop); setCustomPostTypes(q.customPostTypes || []); setPlugins(q.plugins || []); setIncludePM(q.includePM); setIncludeContingency(q.includeContingency); setDiscountType(q.discountType); setDiscountValue(q.discountValue); setClientName(q.clientName); setProjectName(q.projectName); setEditingId(q.id); setView("calculator");
   };
 
   const deleteQuote = (id) => { setQuotes(quotes.filter(function(q) { return q.id !== id; })); if (expandedId === id) setExpandedId(null); };
@@ -217,19 +291,19 @@ export default function PricingAssistant() {
   const updateNotes = (id, n) => { setQuotes(quotes.map(function(q) { return q.id === id ? Object.assign({}, q, { notes: n }) : q; })); };
 
   const resetCalculator = () => {
-    setPages(5); setIncludeDesign(true); setIncludeDev(true); setIncludeCopy(false); setIsLandingPage(false); setAddBlog(false); setAddShop(false); setCustomPostTypes([]); setIncludePM(true); setIncludeContingency(true); setDiscountType("percent"); setDiscountValue(0); setClientName(""); setProjectName(""); setEditingId(null);
+    setPages(5); setIncludeDesign(true); setIncludeDev(true); setIncludeCopy(false); setIsLandingPage(false); setAddBlog(false); setAddShop(false); setCustomPostTypes([]); setPlugins([]); setIncludePM(true); setIncludeContingency(true); setDiscountType("percent"); setDiscountValue(0); setClientName(""); setProjectName(""); setEditingId(null);
   };
 
   const copyEstimate = () => {
-    const text = buildQuoteText({ pages, includeDesign, includeDev, includeCopy, isLandingPage, addBlog, addShop, customPostTypes, includePM, includeContingency, discountType, discountValue, clientName, projectName });
+    const text = buildQuoteText({ pages, includeDesign, includeDev, includeCopy, isLandingPage, addBlog, addShop, customPostTypes, plugins, includePM, includeContingency, discountType, discountValue, clientName, projectName }, settings);
     navigator.clipboard.writeText(text); setCopied(true); setTimeout(function() { setCopied(false); }, 2000);
   };
 
-  const copyQuote = (q) => { navigator.clipboard.writeText(buildQuoteText(q)); setCopiedQuoteId(q.id); setTimeout(function() { setCopiedQuoteId(null); }, 2000); };
+  const copyQuote = (q) => { navigator.clipboard.writeText(buildQuoteText(q, settings)); setCopiedQuoteId(q.id); setTimeout(function() { setCopiedQuoteId(null); }, 2000); };
 
   const filtered = filterStatus === "All" ? quotes : quotes.filter(function(q) { return q.status === filterStatus; });
-  const totalQuoted = quotes.reduce(function(s, q) { return s + calcTotal(q); }, 0);
-  const totalAccepted = quotes.filter(function(q) { return q.status === "Accepted"; }).reduce(function(s, q) { return s + calcTotal(q); }, 0);
+  const totalQuoted = quotes.reduce(function(s, q) { return s + calcTotal(q, settings); }, 0);
+  const totalAccepted = quotes.filter(function(q) { return q.status === "Accepted"; }).reduce(function(s, q) { return s + calcTotal(q, settings); }, 0);
 
   // ─── Dynamic CSS ───
   const css = [
@@ -259,6 +333,20 @@ export default function PricingAssistant() {
     ".tab-inactive:hover { color: " + t.textMuted + "; }",
     ".quote-card { background: " + t.surface + "; border: 1px solid " + t.border + "; border-radius: 12px; transition: all 0.25s ease; }",
     ".quote-card:hover { border-color: " + t.borderLight + "; }",
+    "@media (max-width: 768px) { .container { padding: 24px 16px 40px !important; } }",
+    "@media (max-width: 768px) { .tab { padding: 8px 16px; font-size: 13px; } }",
+    "@media (max-width: 768px) { .btn-primary { padding: 12px 24px; font-size: 14px; } }",
+    "@media (max-width: 768px) { .header-title { font-size: 24px !important; } }",
+    "@media (max-width: 768px) { .header-tabs { flex-direction: column; width: 100%; gap: 8px !important; } }",
+    "@media (max-width: 768px) { .header-tabs .tab { width: 100%; text-align: center; } }",
+    "@media (max-width: 968px) { .calculator-grid { grid-template-columns: 1fr !important; gap: 32px !important; } }",
+    "@media (max-width: 968px) { .summary-card { position: relative !important; top: 0 !important; } }",
+    "@media (max-width: 968px) { .calculator-right { order: -1; } }",
+    "@media (max-width: 640px) { .stats-grid { grid-template-columns: 1fr !important; } }",
+    "@media (min-width: 641px) and (max-width: 768px) { .stats-grid { grid-template-columns: repeat(2, 1fr) !important; } }",
+    "@media (max-width: 768px) { .quote-details { grid-template-columns: 1fr !important; } }",
+    "@media (max-width: 640px) { .quote-card-header { flex-direction: column; align-items: flex-start !important; } }",
+    "@media (max-width: 640px) { .quote-card-meta { width: 100%; justify-content: space-between; } }",
   ].join("\n");
 
   // ─── Theme toggle button ───
@@ -280,21 +368,22 @@ export default function PricingAssistant() {
       <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=Playfair+Display:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet" />
       <style dangerouslySetInnerHTML={{ __html: css }} />
 
-      <div style={{ maxWidth: 920, margin: "0 auto", padding: "40px 32px 60px" }}>
+      <div style={{ maxWidth: 920, margin: "0 auto", padding: "40px 32px 60px" }} className="container">
 
         {/* Header */}
-        <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", marginBottom: 32 }}>
+        <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", marginBottom: 32, flexWrap: "wrap", gap: 16 }}>
           <div>
             <div style={{ fontSize: 11, letterSpacing: 3, textTransform: "uppercase", color: t.textFaint, marginBottom: 8 }}>Pricing Studio</div>
-            <h1 style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: 32, fontWeight: 400, lineHeight: 1.2 }}>
-              {view === "calculator" ? (<>Project <span style={{ color: t.accent, fontStyle: "italic" }}>Estimate</span></>) : (<>Saved <span style={{ color: t.accent, fontStyle: "italic" }}>Quotes</span></>)}
+            <h1 className="header-title" style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: 32, fontWeight: 400, lineHeight: 1.2 }}>
+              {view === "calculator" ? (<>Project <span style={{ color: t.accent, fontStyle: "italic" }}>Estimate</span></>) : view === "crm" ? (<>Saved <span style={{ color: t.accent, fontStyle: "italic" }}>Quotes</span></>) : (<>Pricing <span style={{ color: t.accent, fontStyle: "italic" }}>Settings</span></>)}
             </h1>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
             <ThemeToggle />
-            <div style={{ display: "flex", gap: 4, background: t.surfaceAlt, borderRadius: 10, padding: 4 }}>
+            <div className="header-tabs" style={{ display: "flex", gap: 4, background: t.surfaceAlt, borderRadius: 10, padding: 4 }}>
               <button className={"tab " + (view === "calculator" ? "tab-active" : "tab-inactive")} onClick={() => setView("calculator")}>Calculator</button>
               <button className={"tab " + (view === "crm" ? "tab-active" : "tab-inactive")} onClick={() => setView("crm")}>Quotes{quotes.length > 0 ? " (" + quotes.length + ")" : ""}</button>
+              <button className={"tab " + (view === "settings" ? "tab-active" : "tab-inactive")} onClick={() => setView("settings")}>Settings</button>
             </div>
           </div>
         </div>
@@ -309,9 +398,9 @@ export default function PricingAssistant() {
               </div>
             )}
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 340px", gap: 40 }}>
+            <div className="calculator-grid" style={{ display: "grid", gridTemplateColumns: "1fr 340px", gap: 40 }}>
               {/* LEFT */}
-              <div style={{ display: "flex", flexDirection: "column", gap: 32 }}>
+              <div className="calculator-left" style={{ display: "flex", flexDirection: "column", gap: 32 }}>
 
                 <div>
                   <div className="section-label">Project Type</div>
@@ -323,9 +412,9 @@ export default function PricingAssistant() {
                   <div>
                     <div className="section-label">Services</div>
                     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                      <Toggle t={t} active={includeDesign} onToggle={() => setIncludeDesign(!includeDesign)} label="Design" sublabel={formatPrice(RATE) + " per page"} rightContent={includeDesign ? formatPrice(effectivePages * RATE) : null} />
-                      <Toggle t={t} active={includeDev} onToggle={() => setIncludeDev(!includeDev)} label="Development" sublabel={formatPrice(RATE) + " per page"} rightContent={includeDev ? formatPrice(effectivePages * RATE) : null} />
-                      <Toggle t={t} active={includeCopy} onToggle={() => setIncludeCopy(!includeCopy)} label="Copywriting" sublabel={formatPrice(RATE) + " per page"} rightContent={includeCopy ? formatPrice(effectivePages * RATE) : null} />
+                      <Toggle t={t} active={includeDesign} onToggle={() => setIncludeDesign(!includeDesign)} label="Design" sublabel={formatPrice(displayRate) + " per page"} rightContent={includeDesign ? formatPrice(effectivePages * displayRate) : null} />
+                      <Toggle t={t} active={includeDev} onToggle={() => setIncludeDev(!includeDev)} label="Development" sublabel={formatPrice(displayRate) + " per page"} rightContent={includeDev ? formatPrice(effectivePages * displayRate) : null} />
+                      <Toggle t={t} active={includeCopy} onToggle={() => setIncludeCopy(!includeCopy)} label="Copywriting" sublabel={formatPrice(displayRate) + " per page"} rightContent={includeCopy ? formatPrice(effectivePages * displayRate) : null} />
                     </div>
                   </div>
                 )}
@@ -389,6 +478,69 @@ export default function PricingAssistant() {
                         </div>
                       )}
                     </div>
+
+                    {/* Plugins / Third-party Costs */}
+                    <div style={{ marginTop: 16 }}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                        <div className="section-label" style={{ marginBottom: 0 }}>Plugins / Third-Party Services</div>
+                        <button onClick={() => setPlugins(plugins.concat([{ id: uid(), name: "", cost: 0, frequency: "one-time" }]))} style={{ padding: "5px 14px", borderRadius: 99, border: "1px solid " + t.border, background: "transparent", color: t.accent, cursor: "pointer", fontSize: 12, fontFamily: "inherit", fontWeight: 500, transition: "all 0.2s ease" }}>+ Add Plugin</button>
+                      </div>
+                      {plugins.length === 0 && (
+                        <div style={{ fontSize: 13, color: t.textFaint, padding: "8px 0" }}>e.g. SEO tools, analytics, premium themes</div>
+                      )}
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                        {plugins.map(function(plugin, i) {
+                          return (
+                            <div key={plugin.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 16px", borderRadius: 10, background: t.surfaceAlt, border: "1px solid " + t.borderAccent, flexWrap: "wrap" }}>
+                              <input
+                                className="input-field"
+                                placeholder="e.g. Yoast SEO Premium"
+                                value={plugin.name}
+                                onChange={function(e) {
+                                  var updated = plugins.map(function(p, j) { return j === i ? Object.assign({}, p, { name: e.target.value }) : p; });
+                                  setPlugins(updated);
+                                }}
+                                style={{ flex: "1 1 180px", minWidth: 180, padding: "8px 12px", fontSize: 13 }}
+                              />
+                              <div style={{ position: "relative", width: 100 }}>
+                                <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: t.textMuted, fontSize: 12, pointerEvents: "none" }}>£</span>
+                                <input
+                                  className="input-field"
+                                  type="number"
+                                  min={0}
+                                  placeholder="0"
+                                  value={plugin.cost || ""}
+                                  onChange={function(e) {
+                                    var updated = plugins.map(function(p, j) { return j === i ? Object.assign({}, p, { cost: Math.max(0, parseInt(e.target.value) || 0) }) : p; });
+                                    setPlugins(updated);
+                                  }}
+                                  style={{ padding: "8px 8px 8px 24px", fontSize: 13, textAlign: "right" }}
+                                />
+                              </div>
+                              <select
+                                className="input-field"
+                                value={plugin.frequency || "one-time"}
+                                onChange={function(e) {
+                                  var updated = plugins.map(function(p, j) { return j === i ? Object.assign({}, p, { frequency: e.target.value }) : p; });
+                                  setPlugins(updated);
+                                }}
+                                style={{ padding: "8px 12px", fontSize: 13, width: 110 }}
+                              >
+                                <option value="one-time">One-time</option>
+                                <option value="monthly">/month</option>
+                                <option value="annual">/year</option>
+                              </select>
+                              <button onClick={function() { setPlugins(plugins.filter(function(_, j) { return j !== i; })); }} style={{ background: "transparent", border: "none", color: t.red, cursor: "pointer", fontSize: 16, padding: "4px 8px", lineHeight: 1 }}>{"\u00d7"}</button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      {plugins.length > 0 && pluginCost > 0 && (
+                        <div style={{ fontSize: 12, color: t.textDim, marginTop: 8 }}>
+                          {plugins.length} plugin{plugins.length !== 1 ? "s" : ""} / service{plugins.length !== 1 ? "s" : ""} = {formatPrice(pluginCost)}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 )}
 
@@ -420,8 +572,8 @@ export default function PricingAssistant() {
               </div>
 
               {/* RIGHT — Summary */}
-              <div>
-                <div style={{ position: "sticky", top: 32, background: t.summaryBg, border: "1px solid " + t.accentBorder, borderRadius: 16, padding: 28 }}>
+              <div className="calculator-right">
+                <div className="summary-card" style={{ position: "sticky", top: 32, background: t.summaryBg, border: "1px solid " + t.accentBorder, borderRadius: 16, padding: 28 }}>
                   <div style={{ marginBottom: 20 }}>
                     <input className="input-field" placeholder="Client name" value={clientName} onChange={(e) => setClientName(e.target.value)} style={{ marginBottom: 8 }} />
                     <input className="input-field" placeholder="Project name" value={projectName} onChange={(e) => setProjectName(e.target.value)} />
@@ -446,17 +598,22 @@ export default function PricingAssistant() {
                     </>
                   ) : (
                     <>
-                      <div className="summary-row" style={{ color: t.textMuted }}><span>{effectivePages} page{effectivePages !== 1 ? "s" : ""}</span><span>{formatPrice(perPageCost)}/pg</span></div>
-                      {services.map((s) => (<div key={s} className="summary-row" style={{ color: t.textDim, fontSize: 13, paddingLeft: 12 }}><span>{s}</span><span>{formatPrice(effectivePages * RATE)}</span></div>))}
+                      <div className="summary-row" style={{ color: t.textMuted }}><span>{effectivePages} page{effectivePages !== 1 ? "s" : ""}</span><span>{formatPrice(services.length * displayRate)}/pg</span></div>
+                      {services.map((s) => (<div key={s} className="summary-row" style={{ color: t.textDim, fontSize: 13, paddingLeft: 12 }}><span>{s}</span><span>{formatPrice(effectivePages * displayRate)}</span></div>))}
                       <div className="summary-divider" />
-                      <div className="summary-row"><span>Pages</span><span>{formatPrice(pageTotal)}</span></div>
+                      <div className="summary-row"><span>Pages</span><span>{formatPrice(effectivePages * services.length * displayRate)}</span></div>
                       {addBlog && <div className="summary-row" style={{ color: t.textMuted }}><span>Blog</span><span>{formatPrice(700)}</span></div>}
                       {addShop && <div className="summary-row" style={{ color: t.textMuted }}><span>Shop</span><span>{formatPrice(700)}</span></div>}
                       {customPostTypes.map(function(cpt) { return <div key={cpt.id} className="summary-row" style={{ color: t.textMuted }}><span>{cpt.name || "Custom Post Type"}</span><span>{formatPrice(700)}</span></div>; })}
+                      {plugins.map(function(plugin) { return plugin.cost > 0 ? <div key={plugin.id} className="summary-row" style={{ color: t.textMuted }}><span>{plugin.name || "Plugin/Service"}{plugin.frequency !== "one-time" ? " (" + (plugin.frequency === "monthly" ? "/mo" : "/yr") + ")" : ""}</span><span>{formatPrice(plugin.cost)}</span></div> : null; })}
                       <div className="summary-divider" />
-                      <div className="summary-row" style={{ fontWeight: 500 }}><span>Subtotal</span><span>{formatPrice(subtotal)}</span></div>
-                      {includePM && <div className="summary-row" style={{ color: t.textMuted }}><span>PM (20%)</span><span>{formatPrice(pmCost)}</span></div>}
-                      {includeContingency && <div className="summary-row" style={{ color: t.textMuted }}><span>Contingency (20%)</span><span>{formatPrice(contingencyCost)}</span></div>}
+                      {settings.showInternalCosts && (
+                        <>
+                          <div className="summary-row" style={{ fontWeight: 500 }}><span>Subtotal</span><span>{formatPrice(subtotal)}</span></div>
+                          {includePM && <div className="summary-row" style={{ color: t.textMuted }}><span>PM (20%)</span><span>{formatPrice(pmCost)}</span></div>}
+                          {includeContingency && <div className="summary-row" style={{ color: t.textMuted }}><span>Contingency (20%)</span><span>{formatPrice(contingencyCost)}</span></div>}
+                        </>
+                      )}
                       {discountAmount > 0 && <div className="summary-row" style={{ color: t.green }}><span>Discount{discountType === "percent" ? " (" + discountValue + "%)" : ""}</span><span>{"\u2212"}{formatPrice(discountAmount)}</span></div>}
                       <div style={{ height: 1, background: t.dividerAccent, margin: "10px 0" }} />
                       {belowMinimum && <div className="summary-row" style={{ fontSize: 12, color: t.accentDim }}><span>Min. project cost</span><span>{formatPrice(MIN_PROJECT)}</span></div>}
@@ -466,6 +623,13 @@ export default function PricingAssistant() {
                       </div>
                       <button className="btn-primary" onClick={saveQuote} style={{ width: "100%", marginTop: 12 }}>{editingId ? "Update Quote" : "Save Quote"}</button>
                       <button className="btn-sm" onClick={copyEstimate} style={{ width: "100%", marginTop: 8 }}>{copied ? "\u2713 Copied!" : "Copy to clipboard"}</button>
+                      {(recurringCosts.monthly > 0 || recurringCosts.annual > 0) && (
+                        <div style={{ marginTop: 20, padding: 16, background: t.accentBg, border: "1px solid " + t.accentBorder, borderRadius: 10 }}>
+                          <div style={{ fontSize: 11, letterSpacing: 2, textTransform: "uppercase", color: t.accentDim, marginBottom: 10 }}>Recurring Costs</div>
+                          {recurringCosts.monthly > 0 && <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: t.text, marginBottom: 6 }}><span>Monthly</span><span style={{ fontWeight: 600, color: t.accent }}>{formatPrice(recurringCosts.monthly)}/mo</span></div>}
+                          {recurringCosts.annual > 0 && <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: t.text }}><span>Annual</span><span style={{ fontWeight: 600, color: t.accent }}>{formatPrice(recurringCosts.annual)}/yr</span></div>}
+                        </div>
+                      )}
                     </>
                   )}
                 </div>
@@ -478,7 +642,7 @@ export default function PricingAssistant() {
         {view === "crm" && (
           <div className="fade-in">
             {/* Stats */}
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16, marginBottom: 32 }}>
+            <div className="stats-grid" style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16, marginBottom: 32 }}>
               {[
                 { label: "Total Quotes", value: quotes.length, color: t.text, isCurrency: false },
                 { label: "Total Quoted", value: totalQuoted, color: t.accent, isCurrency: true },
@@ -508,16 +672,16 @@ export default function PricingAssistant() {
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                 {filtered.map(function(q) {
-                  const qTotal = calcTotal(q);
+                  const qTotal = calcTotal(q, settings);
                   const isExp = expandedId === q.id;
                   return (
                     <div key={q.id} className="quote-card">
-                      <div onClick={() => setExpandedId(isExp ? null : q.id)} style={{ padding: "20px 24px", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                        <div>
+                      <div onClick={() => setExpandedId(isExp ? null : q.id)} className="quote-card-header" style={{ padding: "20px 24px", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
+                        <div style={{ minWidth: 0, flex: "1 1 200px" }}>
                           <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 2 }}>{q.projectName || q.clientName || "Untitled"}</div>
                           <div style={{ fontSize: 12, color: t.textDim }}>{q.clientName && q.projectName ? q.clientName + " \u00b7 " : ""}{formatDate(q.createdAt)}{q.isLandingPage ? " \u00b7 Landing Page" : " \u00b7 " + q.pages + " pages"}</div>
                         </div>
-                        <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+                        <div className="quote-card-meta" style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
                           <span style={{ display: "inline-block", padding: "4px 14px", borderRadius: 99, fontSize: 12, fontWeight: 600, background: STATUS_COLORS[q.status] + "18", color: STATUS_COLORS[q.status] }}>{q.status}</span>
                           <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 20, fontWeight: 700, color: t.accent }}>{formatPrice(qTotal)}</div>
                           <span style={{ color: t.textFaint, fontSize: 18, transition: "transform 0.2s ease", transform: isExp ? "rotate(180deg)" : "rotate(0deg)" }}>{"\u25BE"}</span>
@@ -525,7 +689,7 @@ export default function PricingAssistant() {
                       </div>
                       {isExp && (
                         <div style={{ padding: "0 24px 24px", borderTop: "1px solid " + t.divider }}>
-                          <div style={{ paddingTop: 20, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
+                          <div className="quote-details" style={{ paddingTop: 20, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
                             <div>
                               <div className="section-label">Status</div>
                               <div style={{ display: "flex", gap: 6, marginBottom: 20, flexWrap: "wrap" }}>
@@ -537,7 +701,7 @@ export default function PricingAssistant() {
                             <div>
                               <div className="section-label">Actions</div>
                               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                                <button className="btn-primary" onClick={() => exportPDF(q)} style={{ padding: "12px 20px", fontSize: 13 }}>Export PDF</button>
+                                <button className="btn-primary" onClick={() => exportPDF(q, settings)} style={{ padding: "12px 20px", fontSize: 13 }}>Export PDF</button>
                                 <button className="btn-sm" onClick={() => copyQuote(q)}>{copiedQuoteId === q.id ? "\u2713 Copied!" : "Copy to Clipboard"}</button>
                                 <button className="btn-sm" onClick={() => editQuote(q)}>Edit in Calculator</button>
                                 <button className="btn-sm" onClick={() => { if (window.confirm("Delete this quote?")) deleteQuote(q.id); }} style={{ color: t.red, borderColor: t.red + "33" }}>Delete Quote</button>
@@ -551,6 +715,201 @@ export default function PricingAssistant() {
                 })}
               </div>
             )}
+          </div>
+        )}
+
+        {/* ══════════ SETTINGS ══════════ */}
+        {view === "settings" && (
+          <div className="fade-in">
+            <div style={{ maxWidth: 600, margin: "0 auto" }}>
+              <div style={{ background: t.surface, border: "1px solid " + t.border, borderRadius: 16, padding: 32 }}>
+                <div style={{ marginBottom: 32 }}>
+                  <div className="section-label">Default Rates</div>
+                  <div style={{ fontSize: 13, color: t.textDim, marginBottom: 20, lineHeight: 1.6 }}>
+                    Configure your default pricing rates. These will be used for all new quotes. Existing quotes will continue to use their original rates.
+                  </div>
+
+                  <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+                    {/* Per Page Rate */}
+                    <div>
+                      <label style={{ display: "block", fontSize: 13, fontWeight: 500, color: t.text, marginBottom: 8 }}>
+                        Per Page Rate
+                      </label>
+                      <div style={{ position: "relative" }}>
+                        <span style={{ position: "absolute", left: 14, top: "50%", transform: "translateY(-50%)", color: t.textMuted, fontSize: 14, pointerEvents: "none" }}>£</span>
+                        <input
+                          className="input-field"
+                          type="number"
+                          min={0}
+                          value={settings.rate}
+                          onChange={(e) => setSettings({ ...settings, rate: Math.max(0, parseInt(e.target.value) || 0) })}
+                          style={{ paddingLeft: 34 }}
+                        />
+                      </div>
+                      <div style={{ fontSize: 12, color: t.textDim, marginTop: 6 }}>
+                        Cost per page for each service (design, dev, copywriting)
+                      </div>
+                    </div>
+
+                    {/* Landing Page Price */}
+                    <div>
+                      <label style={{ display: "block", fontSize: 13, fontWeight: 500, color: t.text, marginBottom: 8 }}>
+                        Landing Page Price
+                      </label>
+                      <div style={{ position: "relative" }}>
+                        <span style={{ position: "absolute", left: 14, top: "50%", transform: "translateY(-50%)", color: t.textMuted, fontSize: 14, pointerEvents: "none" }}>£</span>
+                        <input
+                          className="input-field"
+                          type="number"
+                          min={0}
+                          value={settings.landingPagePrice}
+                          onChange={(e) => setSettings({ ...settings, landingPagePrice: Math.max(0, parseInt(e.target.value) || 0) })}
+                          style={{ paddingLeft: 34 }}
+                        />
+                      </div>
+                      <div style={{ fontSize: 12, color: t.textDim, marginTop: 6 }}>
+                        Fixed price for landing page package
+                      </div>
+                    </div>
+
+                    {/* Minimum Project Cost */}
+                    <div>
+                      <label style={{ display: "block", fontSize: 13, fontWeight: 500, color: t.text, marginBottom: 8 }}>
+                        Minimum Project Cost
+                      </label>
+                      <div style={{ position: "relative" }}>
+                        <span style={{ position: "absolute", left: 14, top: "50%", transform: "translateY(-50%)", color: t.textMuted, fontSize: 14, pointerEvents: "none" }}>£</span>
+                        <input
+                          className="input-field"
+                          type="number"
+                          min={0}
+                          value={settings.minProject}
+                          onChange={(e) => setSettings({ ...settings, minProject: Math.max(0, parseInt(e.target.value) || 0) })}
+                          style={{ paddingLeft: 34 }}
+                        />
+                      </div>
+                      <div style={{ fontSize: 12, color: t.textDim, marginTop: 6 }}>
+                        Minimum total for standard projects (not applied to landing pages)
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Client Presentation Options */}
+                <div style={{ marginBottom: 32, paddingTop: 32, borderTop: "1px solid " + t.divider }}>
+                  <div className="section-label">Client Presentation</div>
+                  <div style={{ fontSize: 13, color: t.textDim, marginBottom: 20, lineHeight: 1.6 }}>
+                    Control what clients see in quotes, PDFs, and exports.
+                  </div>
+
+                  <div style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "16px 20px", borderRadius: 10, background: t.surfaceAlt, border: "1px solid " + t.border, cursor: "pointer" }} onClick={() => setSettings({ ...settings, showInternalCosts: !settings.showInternalCosts })}>
+                    <div style={{ width: 40, height: 22, borderRadius: 99, background: settings.showInternalCosts ? t.accentBg : t.toggleBg, border: "1px solid " + (settings.showInternalCosts ? t.accent : t.borderLight), position: "relative", transition: "all 0.3s ease", flexShrink: 0, marginTop: 2 }}>
+                      <div style={{ width: 16, height: 16, borderRadius: 99, background: settings.showInternalCosts ? t.accent : t.toggleDot, position: "absolute", top: 2, left: settings.showInternalCosts ? 20 : 2, transition: "all 0.3s ease" }} />
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 14, fontWeight: 500, color: t.text, marginBottom: 4 }}>Show PM & Contingency as Line Items</div>
+                      <div style={{ fontSize: 13, color: t.textDim, lineHeight: 1.5 }}>
+                        When OFF (recommended): PM and contingency costs are included in the total but hidden from clients.
+                        When ON: These costs appear as separate line items in quotes and PDFs.
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Data Backup */}
+                <div style={{ marginBottom: 32, paddingTop: 32, borderTop: "1px solid " + t.divider }}>
+                  <div className="section-label">Data Backup</div>
+                  <div style={{ fontSize: 13, color: t.textDim, marginBottom: 20, lineHeight: 1.6 }}>
+                    Export all your quotes and settings to a file, or import from a backup. This protects your data if you clear your browser cache.
+                  </div>
+
+                  <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                    <button
+                      className="btn-primary"
+                      onClick={() => {
+                        const data = { quotes: quotes, settings: settings, exportDate: new Date().toISOString(), version: "1.0" };
+                        const json = JSON.stringify(data, null, 2);
+                        const blob = new Blob([json], { type: "application/json" });
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement("a");
+                        a.href = url;
+                        a.download = "pricing-studio-backup-" + new Date().toISOString().split("T")[0] + ".json";
+                        a.click();
+                        URL.revokeObjectURL(url);
+                      }}
+                      style={{ padding: "12px 24px", fontSize: 13 }}
+                    >
+                      Export Data
+                    </button>
+                    <button
+                      className="btn-sm"
+                      onClick={() => {
+                        const input = document.createElement("input");
+                        input.type = "file";
+                        input.accept = "application/json";
+                        input.onchange = function(e) {
+                          const file = e.target.files[0];
+                          if (!file) return;
+                          const reader = new FileReader();
+                          reader.onload = function(event) {
+                            try {
+                              const data = JSON.parse(event.target.result);
+                              if (data.quotes) setQuotes(data.quotes);
+                              if (data.settings) setSettings(data.settings);
+                              alert("Data imported successfully! Loaded " + (data.quotes?.length || 0) + " quotes.");
+                            } catch (err) {
+                              alert("Failed to import data. Please check the file format.");
+                            }
+                          };
+                          reader.readAsText(file);
+                        };
+                        input.click();
+                      }}
+                      style={{ padding: "12px 24px", fontSize: 13 }}
+                    >
+                      Import Data
+                    </button>
+                  </div>
+
+                  <div style={{ fontSize: 12, color: t.textFaint, marginTop: 12, lineHeight: 1.5 }}>
+                    💡 Tip: Export regularly to keep a backup of your quotes and settings. The exported file can be imported back at any time.
+                  </div>
+                </div>
+
+                {/* Reset to defaults */}
+                <div style={{ borderTop: "1px solid " + t.divider, paddingTop: 24 }}>
+                  <button
+                    className="btn-sm"
+                    onClick={() => {
+                      if (window.confirm("Reset all settings to default values?")) {
+                        setSettings({ rate: DEFAULT_RATE, minProject: DEFAULT_MIN_PROJECT, landingPagePrice: DEFAULT_LANDING_PAGE_PRICE, showInternalCosts: false });
+                      }
+                    }}
+                    style={{ color: t.textDim, borderColor: t.border }}
+                  >
+                    Reset to Defaults
+                  </button>
+                  <div style={{ fontSize: 12, color: t.textFaint, marginTop: 12 }}>
+                    Default: {formatPrice(DEFAULT_RATE)}/page · {formatPrice(DEFAULT_LANDING_PAGE_PRICE)} landing page · {formatPrice(DEFAULT_MIN_PROJECT)} minimum
+                  </div>
+                </div>
+
+                {/* Preview */}
+                <div style={{ marginTop: 32, padding: 20, background: t.accentBg, border: "1px solid " + t.accentBorder, borderRadius: 12 }}>
+                  <div style={{ fontSize: 11, letterSpacing: 2, textTransform: "uppercase", color: t.accentDim, marginBottom: 12 }}>Preview</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8, fontSize: 13 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", color: t.text }}>
+                      <span>5-page website (Design + Dev)</span>
+                      <span style={{ fontWeight: 600, color: t.accent }}>{formatPrice(5 * 2 * settings.rate)}</span>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", color: t.text }}>
+                      <span>Landing page offer</span>
+                      <span style={{ fontWeight: 600, color: t.accent }}>{formatPrice(settings.landingPagePrice)}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         )}
 
