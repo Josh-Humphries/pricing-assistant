@@ -1,4 +1,6 @@
 import { useState, useEffect } from "react";
+import { useQuotes } from './hooks/useQuotes';
+import { useSettings } from './hooks/useSettings';
 
 // ─── Constants ───
 const DEFAULT_RATE = 175;
@@ -42,11 +44,8 @@ const themes = {
 function formatPrice(n) { return "\u00a3" + n.toLocaleString("en-GB"); }
 function formatDate(iso) { return new Date(iso).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }); }
 function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
-function loadQuotes() { try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; } catch { return []; } }
-function saveQuotes(q) { localStorage.setItem(STORAGE_KEY, JSON.stringify(q)); }
 function loadTheme() { try { return localStorage.getItem(THEME_KEY) || "dark"; } catch { return "dark"; } }
-function loadSettings() { try { return JSON.parse(localStorage.getItem(SETTINGS_KEY)) || { rate: DEFAULT_RATE, minProject: DEFAULT_MIN_PROJECT, landingPagePrice: DEFAULT_LANDING_PAGE_PRICE, showInternalCosts: false }; } catch { return { rate: DEFAULT_RATE, minProject: DEFAULT_MIN_PROJECT, landingPagePrice: DEFAULT_LANDING_PAGE_PRICE, showInternalCosts: false }; } }
-function saveSettings(s) { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); }
+// Note: loadQuotes, saveQuotes, loadSettings, saveSettings removed - now handled by custom hooks
 
 function calcTotal(q, settings) {
   const rate = settings?.rate || DEFAULT_RATE;
@@ -215,8 +214,8 @@ function buildQuoteText(q, settings) {
 export default function PricingAssistant() {
   const [mode, setMode] = useState(loadTheme);
   const [view, setView] = useState("calculator");
-  const [quotes, setQuotes] = useState(loadQuotes);
-  const [settings, setSettings] = useState(loadSettings);
+  const { quotes, setQuotes, addQuote, updateQuote, deleteQuote: deleteQuoteAPI, loading: quotesLoading, error: quotesError } = useQuotes();
+  const { settings, setSettings, updateSettings, loading: settingsLoading, error: settingsError } = useSettings();
 
   const [pages, setPages] = useState(5);
   const [includeDesign, setIncludeDesign] = useState(true);
@@ -241,9 +240,8 @@ export default function PricingAssistant() {
 
   const t = themes[mode];
 
-  useEffect(() => { saveQuotes(quotes); }, [quotes]);
+  // Theme is still stored in localStorage (hooks handle quotes/settings)
   useEffect(() => { localStorage.setItem(THEME_KEY, mode); }, [mode]);
-  useEffect(() => { saveSettings(settings); }, [settings]);
 
   // ─── Pricing ───
   const RATE = settings.rate;
@@ -275,10 +273,17 @@ export default function PricingAssistant() {
   const total = isLandingPage ? rawTotal : Math.max(rawTotal, hasServices ? MIN_PROJECT : 0);
   const belowMinimum = !isLandingPage && rawTotal < MIN_PROJECT && hasServices;
 
-  const saveQuote = () => {
+  const saveQuote = async () => {
     const data = { pages, includeDesign, includeDev, includeCopy, isLandingPage, addBlog, addShop, customPostTypes, plugins, includePM, includeContingency, discountType, discountValue, clientName, projectName, total, status: "Draft", notes: "", createdAt: new Date().toISOString() };
-    if (editingId) { setQuotes(quotes.map(function(q) { return q.id === editingId ? Object.assign({}, q, data, { createdAt: q.createdAt, status: q.status, notes: q.notes }) : q; })); setEditingId(null); }
-    else { data.id = uid(); setQuotes([data].concat(quotes)); }
+    if (editingId) {
+      // Update existing quote
+      await updateQuote(editingId, data);
+      setEditingId(null);
+    } else {
+      // Add new quote
+      data.id = uid();
+      await addQuote(data);
+    }
     setView("crm");
   };
 
@@ -286,9 +291,18 @@ export default function PricingAssistant() {
     setPages(q.pages); setIncludeDesign(q.includeDesign); setIncludeDev(q.includeDev); setIncludeCopy(q.includeCopy); setIsLandingPage(q.isLandingPage); setAddBlog(q.addBlog); setAddShop(q.addShop); setCustomPostTypes(q.customPostTypes || []); setPlugins(q.plugins || []); setIncludePM(q.includePM); setIncludeContingency(q.includeContingency); setDiscountType(q.discountType); setDiscountValue(q.discountValue); setClientName(q.clientName); setProjectName(q.projectName); setEditingId(q.id); setView("calculator");
   };
 
-  const deleteQuote = (id) => { setQuotes(quotes.filter(function(q) { return q.id !== id; })); if (expandedId === id) setExpandedId(null); };
-  const updateStatus = (id, s) => { setQuotes(quotes.map(function(q) { return q.id === id ? Object.assign({}, q, { status: s }) : q; })); };
-  const updateNotes = (id, n) => { setQuotes(quotes.map(function(q) { return q.id === id ? Object.assign({}, q, { notes: n }) : q; })); };
+  const deleteQuote = async (id) => {
+    await deleteQuoteAPI(id);
+    if (expandedId === id) setExpandedId(null);
+  };
+
+  const updateStatus = async (id, s) => {
+    await updateQuote(id, { status: s });
+  };
+
+  const updateNotes = async (id, n) => {
+    await updateQuote(id, { notes: n });
+  };
 
   const resetCalculator = () => {
     setPages(5); setIncludeDesign(true); setIncludeDev(true); setIncludeCopy(false); setIsLandingPage(false); setAddBlog(false); setAddShop(false); setCustomPostTypes([]); setPlugins([]); setIncludePM(true); setIncludeContingency(true); setDiscountType("percent"); setDiscountValue(0); setClientName(""); setProjectName(""); setEditingId(null);
@@ -971,7 +985,10 @@ export default function PricingAssistant() {
                           type="number"
                           min={0}
                           value={settings.rate}
-                          onChange={(e) => setSettings({ ...settings, rate: Math.max(0, parseInt(e.target.value) || 0) })}
+                          onChange={(e) => {
+                            const newRate = Math.max(0, parseInt(e.target.value) || 0);
+                            updateSettings({ rate: newRate });
+                          }}
                           style={{ paddingLeft: 34 }}
                         />
                       </div>
@@ -992,7 +1009,10 @@ export default function PricingAssistant() {
                           type="number"
                           min={0}
                           value={settings.landingPagePrice}
-                          onChange={(e) => setSettings({ ...settings, landingPagePrice: Math.max(0, parseInt(e.target.value) || 0) })}
+                          onChange={(e) => {
+                            const newPrice = Math.max(0, parseInt(e.target.value) || 0);
+                            updateSettings({ landingPagePrice: newPrice });
+                          }}
                           style={{ paddingLeft: 34 }}
                         />
                       </div>
@@ -1013,7 +1033,10 @@ export default function PricingAssistant() {
                           type="number"
                           min={0}
                           value={settings.minProject}
-                          onChange={(e) => setSettings({ ...settings, minProject: Math.max(0, parseInt(e.target.value) || 0) })}
+                          onChange={(e) => {
+                            const newMin = Math.max(0, parseInt(e.target.value) || 0);
+                            updateSettings({ minProject: newMin });
+                          }}
                           style={{ paddingLeft: 34 }}
                         />
                       </div>
@@ -1031,7 +1054,7 @@ export default function PricingAssistant() {
                     Control what clients see in quotes, PDFs, and exports.
                   </div>
 
-                  <div style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "16px 20px", borderRadius: 10, background: t.surfaceAlt, border: "1px solid " + t.border, cursor: "pointer" }} onClick={() => setSettings({ ...settings, showInternalCosts: !settings.showInternalCosts })}>
+                  <div style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "16px 20px", borderRadius: 10, background: t.surfaceAlt, border: "1px solid " + t.border, cursor: "pointer" }} onClick={() => updateSettings({ showInternalCosts: !settings.showInternalCosts })}>
                     <div style={{ width: 40, height: 22, borderRadius: 99, background: settings.showInternalCosts ? t.accentBg : t.toggleBg, border: "1px solid " + (settings.showInternalCosts ? t.accent : t.borderLight), position: "relative", transition: "all 0.3s ease", flexShrink: 0, marginTop: 2 }}>
                       <div style={{ width: 16, height: 16, borderRadius: 99, background: settings.showInternalCosts ? t.accent : t.toggleDot, position: "absolute", top: 2, left: settings.showInternalCosts ? 20 : 2, transition: "all 0.3s ease" }} />
                     </div>
@@ -1102,6 +1125,43 @@ export default function PricingAssistant() {
 
                   <div style={{ fontSize: 12, color: t.textFaint, marginTop: 12, lineHeight: 1.5 }}>
                     💡 Tip: Export regularly to keep a backup of your quotes and settings. The exported file can be imported back at any time.
+                  </div>
+
+                  <div style={{ marginTop: 24, paddingTop: 24, borderTop: "1px solid " + t.divider }}>
+                    <button
+                      className="btn-sm"
+                      onClick={async () => {
+                        if (!window.confirm("Migrate localStorage data to database? This is a one-time operation.")) return;
+
+                        try {
+                          const localQuotes = JSON.parse(localStorage.getItem('pricing-studio-quotes') || '[]');
+                          const localSettings = JSON.parse(localStorage.getItem('pricing-studio-settings') || '{}');
+
+                          const res = await fetch('/api/migrate', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                              quotes: localQuotes,
+                              settings: localSettings,
+                            }),
+                          });
+
+                          const result = await res.json();
+                          alert(`Migration complete! Imported ${result.imported} quotes, skipped ${result.skipped} duplicates.`);
+
+                          // Refresh data
+                          window.location.reload();
+                        } catch (err) {
+                          alert('Migration failed: ' + err.message);
+                        }
+                      }}
+                      style={{ color: t.green, borderColor: t.green + "33", marginBottom: 16 }}
+                    >
+                      Migrate to Database
+                    </button>
+                    <div style={{ fontSize: 11, color: t.textFaint, marginBottom: 16 }}>
+                      One-time: Upload your localStorage data to the database
+                    </div>
                   </div>
 
                   <div style={{ marginTop: 24, paddingTop: 24, borderTop: "1px solid " + t.divider }}>
@@ -1195,7 +1255,7 @@ export default function PricingAssistant() {
                     className="btn-sm"
                     onClick={() => {
                       if (window.confirm("Reset all settings to default values?")) {
-                        setSettings({ rate: DEFAULT_RATE, minProject: DEFAULT_MIN_PROJECT, landingPagePrice: DEFAULT_LANDING_PAGE_PRICE, showInternalCosts: false });
+                        updateSettings({ rate: DEFAULT_RATE, minProject: DEFAULT_MIN_PROJECT, landingPagePrice: DEFAULT_LANDING_PAGE_PRICE, showInternalCosts: false });
                       }
                     }}
                     style={{ color: t.textDim, borderColor: t.border }}
